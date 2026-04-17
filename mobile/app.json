@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "MedNote",
+    "slug": "mednote-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "mednote",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      "expo-router"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {},
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
