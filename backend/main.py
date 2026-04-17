@@ -15,6 +15,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from ai import extract_structured_note_with_graph
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -69,6 +70,7 @@ class TranscribeResponse(BaseModel):
     id: str
     transcript: str
     structured: StructuredNote
+    extraction_meta: dict | None = None
 
 
 class NoteSummary(BaseModel):
@@ -84,6 +86,7 @@ class NoteDetail(BaseModel):
     transcript: str
     structured: StructuredNote
     created_at: str
+    extraction_meta: dict | None = None
 
 
 class HealthResponse(BaseModel):
@@ -256,6 +259,76 @@ def transcribe_audio(audio_path: Path) -> str:
 
 # --- Endpoints ---
 
+async def _transcribe_upload_to_text(audio: UploadFile, note_id: str) -> tuple[Path, str]:
+    """
+    Shared upload/transcription pipeline.
+    Returns (audio_path, transcript).
+    """
+    audio_path = AUDIO_DIR / f"{note_id}.m4a"
+    # 1. Lecture complète du stream (attend la fin de l'upload)
+    content = await audio.read()
+    upload_size = len(content)
+    logger.info("Upload received: size=%d bytes, path=%s", upload_size, audio_path)
+
+    # 2. Validation pré-écriture
+    if upload_size == 0:
+        raise HTTPException(status_code=400, detail="Fichier audio vide")
+    if upload_size < MIN_AUDIO_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fichier trop petit ({upload_size} octets). Enregistrement incomplet.",
+        )
+
+    # 3. Écriture + flush disque (attente complète du stream)
+    with audio_path.open("wb") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+
+    # 4. Vérification post-écriture (taille cohérente)
+    written_size = audio_path.stat().st_size
+    if written_size != upload_size:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur d'écriture: taille attendue {upload_size}, écrite {written_size}",
+        )
+    logger.info("File written: path=%s, size=%d", audio_path, written_size)
+
+    # 5. Validation fichier (existence, taille)
+    validate_audio_file(audio_path)
+
+    # 6. Validation ffprobe AVANT ffmpeg (ne jamais appeler ffmpeg sur fichier invalide)
+    try:
+        probe_result = ffprobe_validate(audio_path)
+        logger.info("ffprobe OK for %s: format=%s", audio_path, probe_result.get("format", {}).get("format_name", "?"))
+    except ValueError as e:
+        if audio_path.exists():
+            audio_path.unlink()
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 7. Transcription (conversion + Whisper)
+    transcript = transcribe_audio(audio_path)
+    return audio_path, transcript
+
+
+def _save_note(
+    note_id: str,
+    transcript: str,
+    structured: StructuredNote,
+    extraction_meta: dict | None = None,
+) -> None:
+    """Persist note payload in JSON storage."""
+    created_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    note_data = {
+        "id": note_id,
+        "transcript": transcript,
+        "structured": structured.model_dump(),
+        "created_at": created_at,
+        "extraction_meta": extraction_meta or {"mode": "heuristic"},
+    }
+    note_path = NOTES_DIR / f"{note_id}.json"
+    note_path.write_text(json.dumps(note_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     """Vérification que l'API est en ligne."""
@@ -273,49 +346,7 @@ async def transcribe(audio: UploadFile = File(..., description="Fichier audio (m
     audio_path = AUDIO_DIR / f"{note_id}.m4a"
 
     try:
-        # 1. Lecture complète du stream (attend la fin de l'upload)
-        content = await audio.read()
-        upload_size = len(content)
-        logger.info("Upload received: size=%d bytes, path=%s", upload_size, audio_path)
-
-        # 2. Validation pré-écriture
-        if upload_size == 0:
-            raise HTTPException(status_code=400, detail="Fichier audio vide")
-        if upload_size < MIN_AUDIO_SIZE_BYTES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Fichier trop petit ({upload_size} octets). Enregistrement incomplet.",
-            )
-
-        # 3. Écriture + flush disque (attente complète du stream)
-        with audio_path.open("wb") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-
-        # 4. Vérification post-écriture (taille cohérente)
-        written_size = audio_path.stat().st_size
-        if written_size != upload_size:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Erreur d'écriture: taille attendue {upload_size}, écrite {written_size}",
-            )
-        logger.info("File written: path=%s, size=%d", audio_path, written_size)
-
-        # 5. Validation fichier (existence, taille)
-        validate_audio_file(audio_path)
-
-        # 6. Validation ffprobe AVANT ffmpeg (ne jamais appeler ffmpeg sur fichier invalide)
-        try:
-            probe_result = ffprobe_validate(audio_path)
-            logger.info("ffprobe OK for %s: format=%s", audio_path, probe_result.get("format", {}).get("format_name", "?"))
-        except ValueError as e:
-            if audio_path.exists():
-                audio_path.unlink()
-            raise HTTPException(status_code=400, detail=str(e))
-
-        # 7. Transcription (conversion + Whisper)
-        transcript = transcribe_audio(audio_path)
+        audio_path, transcript = await _transcribe_upload_to_text(audio, note_id)
 
     except HTTPException:
         raise
@@ -337,21 +368,91 @@ async def transcribe(audio: UploadFile = File(..., description="Fichier audio (m
     # Construction de la note structurée
     structured = build_structured_note(transcript)
 
-    # Sauvegarde en JSON
-    created_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    note_data = {
-        "id": note_id,
-        "transcript": transcript,
-        "structured": structured.model_dump(),
-        "created_at": created_at,
-    }
-    note_path = NOTES_DIR / f"{note_id}.json"
-    note_path.write_text(json.dumps(note_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _save_note(
+        note_id,
+        transcript,
+        structured,
+        extraction_meta={
+            "mode": "heuristic",
+            "confidence_by_field": {},
+            "average_confidence": 0.0,
+            "validation_issues": [],
+            "requires_review": structured.a_verifier,
+        },
+    )
 
     return TranscribeResponse(
         id=note_id,
         transcript=transcript,
         structured=structured,
+        extraction_meta={
+            "mode": "heuristic",
+            "confidence_by_field": {},
+            "average_confidence": 0.0,
+            "validation_issues": [],
+            "requires_review": structured.a_verifier,
+        },
+    )
+
+
+@app.post("/transcribe-ai", response_model=TranscribeResponse)
+async def transcribe_ai(audio: UploadFile = File(..., description="Fichier audio (m4a)")):
+    """
+    Variante IA: transcription Whisper + structuration LangGraph/LangChain.
+    Fallback automatique sur l'extraction heuristique si l'IA échoue.
+    """
+    note_id = str(uuid.uuid4())
+    audio_path = AUDIO_DIR / f"{note_id}.m4a"
+
+    try:
+        audio_path, transcript = await _transcribe_upload_to_text(audio, note_id)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        if audio_path.exists():
+            audio_path.unlink()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        if audio_path.exists():
+            audio_path.unlink()
+        logger.exception("Transcription failed for %s", audio_path)
+        err_str = str(e).lower()
+        if "moov" in err_str or "invalid data" in err_str or "ffmpeg" in err_str:
+            detail = _user_friendly_audio_error(str(e))
+        else:
+            detail = f"Erreur de transcription: {str(e)}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    # Structuration IA + fallback heuristique
+    try:
+        ai_result = extract_structured_note_with_graph(transcript)
+        structured = StructuredNote(**ai_result.structured.model_dump())
+        extraction_meta = {
+            "mode": "ai",
+            "confidence_by_field": ai_result.confidence_by_field,
+            "average_confidence": ai_result.average_confidence,
+            "validation_issues": ai_result.validation_issues,
+            "requires_review": ai_result.requires_review,
+        }
+        logger.info("AI structured extraction succeeded for note_id=%s", note_id)
+    except Exception as e:
+        logger.warning("AI extraction failed, fallback to heuristics for note_id=%s: %s", note_id, e)
+        structured = build_structured_note(transcript)
+        extraction_meta = {
+            "mode": "fallback",
+            "confidence_by_field": {},
+            "average_confidence": 0.0,
+            "validation_issues": ["AI extraction failed; fallback heuristique utilise."],
+            "requires_review": True,
+        }
+
+    _save_note(note_id, transcript, structured, extraction_meta=extraction_meta)
+
+    return TranscribeResponse(
+        id=note_id,
+        transcript=transcript,
+        structured=structured,
+        extraction_meta=extraction_meta,
     )
 
 
@@ -388,6 +489,7 @@ def get_note(note_id: str):
             transcript=data["transcript"],
             structured=StructuredNote(**data["structured"]),
             created_at=data["created_at"],
+            extraction_meta=data.get("extraction_meta"),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

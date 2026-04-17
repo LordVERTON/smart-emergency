@@ -21,6 +21,13 @@ export type TranscribeResponse = {
   id: string;
   transcript: string;
   structured: StructuredNote;
+  extraction_meta?: {
+    mode: "ai" | "fallback" | "heuristic";
+    confidence_by_field: Record<string, number>;
+    average_confidence: number;
+    validation_issues: string[];
+    requires_review: boolean;
+  };
 };
 
 export type NoteSummary = {
@@ -34,6 +41,13 @@ export type NoteDetail = {
   transcript: string;
   structured: StructuredNote;
   created_at: string;
+  extraction_meta?: {
+    mode: "ai" | "fallback" | "heuristic";
+    confidence_by_field: Record<string, number>;
+    average_confidence: number;
+    validation_issues: string[];
+    requires_review: boolean;
+  };
 };
 
 export type SheetSummary = {

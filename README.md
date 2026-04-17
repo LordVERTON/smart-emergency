@@ -50,6 +50,9 @@ L’API sera accessible sur `http://<IP_PC>:8000` (et `http://localhost:8000` su
 
 **Variable d’environnement optionnelle :**
 - `WHISPER_MODEL` : modèle Whisper (`base` par défaut, ou `small` pour plus de précision)
+- `AI_PROVIDER` : provider LLM pour la structuration IA (`openai` par défaut)
+- `OPENAI_API_KEY` : clé API OpenAI (requise pour `/transcribe-ai`)
+- `OPENAI_MODEL` : modèle OpenAI pour extraction structurée (`gpt-4o-mini` par défaut)
 
 ```bash
 WHISPER_MODEL=small uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -99,8 +102,22 @@ Puis scanner le QR code avec Expo Go (Android) ou l’app Caméra (iOS).
 |---------|-----------------|--------------------------------------------------|
 | GET     | `/health`       | Vérification que l’API est en ligne              |
 | POST    | `/transcribe`   | Upload audio (multipart) → transcription + note |
+| POST    | `/transcribe-ai`| Upload audio → transcription + extraction IA (LangGraph + LangChain, fallback heuristique) |
 | GET     | `/notes`        | Liste des notes (id, motif, created_at)          |
 | GET     | `/notes/{id}`   | Détail d’une note                                |
+
+### Détails mode IA “production-ready”
+
+`/transcribe-ai` utilise un graphe LangGraph en 2 nodes:
+- `llm_extract` : extraction structurée via prompt + parser LangChain/Pydantic
+- `clinical_validate` : validation clinique séparée (champs critiques + contrôle qualité)
+
+Métadonnées retournées et stockées dans chaque note (`extraction_meta`) :
+- `mode` : `ai`, `fallback` ou `heuristic`
+- `confidence_by_field` : score par champ structuré
+- `average_confidence` : moyenne globale
+- `validation_issues` : liste d’alertes de validation
+- `requires_review` : booléen final de revue humaine
 
 ---
 
