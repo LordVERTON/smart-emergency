@@ -3,3 +3,6 @@ uvicorn[standard]==0.27.1
 python-multipart==0.0.9
 requests>=2.31.0
 faster-whisper==1.0.3
+langchain==0.3.24
+langgraph==0.2.57
+langchain-openai==0.2.14
