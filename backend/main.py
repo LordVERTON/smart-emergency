@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import uuid
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,8 @@ NOTES_DIR = DATA_DIR / "notes"
 
 # Modèle Whisper (base ou small selon perf)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
 # Création des dossiers si nécessaire
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -243,18 +246,56 @@ def convert_to_wav(audio_path: Path) -> Path:
 
 def transcribe_audio(audio_path: Path) -> str:
     """Transcrit l'audio avec faster-whisper. Retourne le texte en français."""
-    from faster_whisper import WhisperModel
-
     # Conversion m4a -> wav pour éviter "invalid data found" (PyAV tolère mal certains m4a)
     wav_path = convert_to_wav(audio_path)
     try:
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        model = get_whisper_model()
         segments, info = model.transcribe(str(wav_path), language="fr")
         transcript = " ".join(seg.text for seg in segments).strip()
         return transcript or "(Aucune parole détectée)"
     finally:
         if wav_path.exists():
             wav_path.unlink()
+
+
+@lru_cache(maxsize=1)
+def get_whisper_model():
+    """
+    Charge Whisper une seule fois par process pour réduire la latence.
+    Le premier appel est plus lent (warm-up), les suivants sont rapides.
+    """
+    from faster_whisper import WhisperModel
+
+    logger.info(
+        "Loading Whisper model '%s' (device=%s, compute_type=%s)",
+        WHISPER_MODEL,
+        WHISPER_DEVICE,
+        WHISPER_COMPUTE_TYPE,
+    )
+    return WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+
+
+def _handle_transcribe_exception(audio_path: Path, e: Exception) -> None:
+    """Normalize unexpected transcription errors into HTTPException."""
+    if audio_path.exists():
+        audio_path.unlink()
+    logger.exception("Transcription failed for %s", audio_path)
+    err_str = str(e).lower()
+    if "moov" in err_str or "invalid data" in err_str or "ffmpeg" in err_str:
+        detail = _user_friendly_audio_error(str(e))
+    else:
+        detail = f"Erreur de transcription: {str(e)}"
+    raise HTTPException(status_code=500, detail=detail)
+
+
+def _heuristic_extraction_meta(requires_review: bool) -> dict:
+    return {
+        "mode": "heuristic",
+        "confidence_by_field": {},
+        "average_confidence": 0.0,
+        "validation_issues": [],
+        "requires_review": requires_review,
+    }
 
 
 # --- Endpoints ---
@@ -335,6 +376,18 @@ def health():
     return HealthResponse(ok=True)
 
 
+@app.on_event("startup")
+def preload_models() -> None:
+    """
+    Preload the Whisper model to avoid first-request cold start.
+    Failure is non-blocking to keep API boot resilient.
+    """
+    try:
+        get_whisper_model()
+    except Exception as e:
+        logger.warning("Whisper preload failed (will retry on demand): %s", e)
+
+
 @app.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe(audio: UploadFile = File(..., description="Fichier audio (m4a)")):
     """
@@ -355,43 +408,19 @@ async def transcribe(audio: UploadFile = File(..., description="Fichier audio (m
             audio_path.unlink()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        if audio_path.exists():
-            audio_path.unlink()
-        logger.exception("Transcription failed for %s", audio_path)
-        err_str = str(e).lower()
-        if "moov" in err_str or "invalid data" in err_str or "ffmpeg" in err_str:
-            detail = _user_friendly_audio_error(str(e))
-        else:
-            detail = f"Erreur de transcription: {str(e)}"
-        raise HTTPException(status_code=500, detail=detail)
+        _handle_transcribe_exception(audio_path, e)
 
     # Construction de la note structurée
     structured = build_structured_note(transcript)
 
-    _save_note(
-        note_id,
-        transcript,
-        structured,
-        extraction_meta={
-            "mode": "heuristic",
-            "confidence_by_field": {},
-            "average_confidence": 0.0,
-            "validation_issues": [],
-            "requires_review": structured.a_verifier,
-        },
-    )
+    extraction_meta = _heuristic_extraction_meta(structured.a_verifier)
+    _save_note(note_id, transcript, structured, extraction_meta=extraction_meta)
 
     return TranscribeResponse(
         id=note_id,
         transcript=transcript,
         structured=structured,
-        extraction_meta={
-            "mode": "heuristic",
-            "confidence_by_field": {},
-            "average_confidence": 0.0,
-            "validation_issues": [],
-            "requires_review": structured.a_verifier,
-        },
+        extraction_meta=extraction_meta,
     )
 
 
@@ -413,15 +442,7 @@ async def transcribe_ai(audio: UploadFile = File(..., description="Fichier audio
             audio_path.unlink()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        if audio_path.exists():
-            audio_path.unlink()
-        logger.exception("Transcription failed for %s", audio_path)
-        err_str = str(e).lower()
-        if "moov" in err_str or "invalid data" in err_str or "ffmpeg" in err_str:
-            detail = _user_friendly_audio_error(str(e))
-        else:
-            detail = f"Erreur de transcription: {str(e)}"
-        raise HTTPException(status_code=500, detail=detail)
+        _handle_transcribe_exception(audio_path, e)
 
     # Structuration IA + fallback heuristique
     try:

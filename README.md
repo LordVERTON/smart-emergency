@@ -1,6 +1,6 @@
 # MedNote MVP
 
-Application mobile de prise de notes médicales vocales : enregistrement audio, transcription avec Whisper, extraction structurée (sans LLM).
+Application mobile de prise de notes médicales vocales : enregistrement audio, transcription Whisper, extraction structurée heuristique ou IA (LangGraph + LangChain).
 
 ## Prérequis
 
@@ -50,6 +50,8 @@ L’API sera accessible sur `http://<IP_PC>:8000` (et `http://localhost:8000` su
 
 **Variable d’environnement optionnelle :**
 - `WHISPER_MODEL` : modèle Whisper (`base` par défaut, ou `small` pour plus de précision)
+- `WHISPER_DEVICE` : `cpu` (défaut) ou `cuda` si GPU disponible
+- `WHISPER_COMPUTE_TYPE` : `int8` (défaut), `float16` (souvent meilleur sur GPU), etc.
 - `AI_PROVIDER` : provider LLM pour la structuration IA (`openai` par défaut)
 - `OPENAI_API_KEY` : clé API OpenAI (requise pour `/transcribe-ai`)
 - `OPENAI_MODEL` : modèle OpenAI pour extraction structurée (`gpt-4o-mini` par défaut)
@@ -57,6 +59,13 @@ L’API sera accessible sur `http://<IP_PC>:8000` (et `http://localhost:8000` su
 ```bash
 WHISPER_MODEL=small uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+### Optimisations déjà en place (backend)
+
+- Le modèle Whisper est préchargé au startup FastAPI (réduit le cold start sur la première requête).
+- Le modèle Whisper est mis en cache en mémoire process (évite un rechargement coûteux à chaque upload).
+- Pipeline upload audio factorisé et validation stricte (taille, ffprobe, conversion).
+- Endpoint IA avec fallback heuristique automatique si indisponibilité LLM.
 
 ---
 
@@ -106,6 +115,34 @@ Puis scanner le QR code avec Expo Go (Android) ou l’app Caméra (iOS).
 | GET     | `/notes`        | Liste des notes (id, motif, created_at)          |
 | GET     | `/notes/{id}`   | Détail d’une note                                |
 
+### Exemple de test API avec curl
+
+Healthcheck:
+
+```bash
+curl -X GET "http://127.0.0.1:8000/health"
+```
+
+Transcription heuristique:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/transcribe" \
+  -F "audio=@backend/data/audio/sample.m4a;type=audio/m4a"
+```
+
+Transcription IA:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/transcribe-ai" \
+  -F "audio=@backend/data/audio/sample.m4a;type=audio/m4a"
+```
+
+Lister les notes:
+
+```bash
+curl -X GET "http://127.0.0.1:8000/notes"
+```
+
 ### Détails mode IA “production-ready”
 
 `/transcribe-ai` utilise un graphe LangGraph en 2 nodes:
@@ -122,6 +159,14 @@ Métadonnées retournées et stockées dans chaque note (`extraction_meta`) :
 ---
 
 ## Troubleshooting
+
+### Vérification rapide de l’environnement avant tests
+
+- Python: `python --version`
+- ffmpeg: `ffmpeg -version`
+- Node: `node -v`
+- npm: `npm -v`
+- API boot: démarrer `uvicorn` puis vérifier `/health`
 
 ### L’app mobile ne peut pas joindre l’API
 
@@ -184,3 +229,30 @@ cd backend && source venv/bin/activate && uvicorn main:app --reload --host 0.0.0
 # Mobile
 cd mobile && npm start
 ```
+
+---
+
+## Plan de test recommandé (checklist)
+
+### 1) Smoke test backend
+
+- [ ] `GET /health` retourne `{ "ok": true }`
+- [ ] `POST /transcribe` avec un audio valide retourne `id`, `transcript`, `structured`
+- [ ] `POST /transcribe` avec fichier vide retourne `400`
+
+### 2) Test mode IA
+
+- [ ] `POST /transcribe-ai` sans `OPENAI_API_KEY` ne casse pas l’API (fallback heuristique)
+- [ ] `POST /transcribe-ai` avec clé valide remplit `extraction_meta.mode = "ai"` si succès
+- [ ] `validation_issues` et `requires_review` sont présents
+
+### 3) Test persistance
+
+- [ ] `GET /notes` affiche la note nouvellement créée
+- [ ] `GET /notes/{id}` retourne `extraction_meta` cohérent (`ai` / `fallback` / `heuristic`)
+
+### 4) Test mobile (Expo Go)
+
+- [ ] Bouton `/health` fonctionnel
+- [ ] Enregistrement puis envoi fonctionnel
+- [ ] Historique + détail note affichés
