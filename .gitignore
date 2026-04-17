@@ -1,0 +1,19 @@
+# Python bytecode and cache directories
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Node / Expo
+mobile/node_modules/
+mobile/.expo/
+mobile/.expo-shared/
+
+# Logs and OS/editor noise
+*.log
+.DS_Store
+Thumbs.db
