@@ -8,6 +8,10 @@ venv/
 .venv/
 env/
 
+# Backend runtime artifacts
+backend/data/audio/
+backend/data/notes/
+
 # Node / Expo
 mobile/node_modules/
 mobile/.expo/
