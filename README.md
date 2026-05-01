@@ -256,3 +256,8 @@ cd mobile && npm start
 - [ ] Bouton `/health` fonctionnel
 - [ ] Enregistrement puis envoi fonctionnel
 - [ ] Historique + détail note affichés
+
+### Note maintenance (audio)
+
+- `expo-av` est conservé temporairement pour accélérer le développement.
+- Migration prévue plus tard vers une librairie audio activement maintenue et compatible New Architecture.
