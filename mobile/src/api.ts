@@ -72,6 +72,13 @@ export type SheetDetail = {
   aVerifier: boolean;
 };
 
+function getNgrokBypassHeaders(): Record<string, string> {
+  if (API_BASE.includes("ngrok-free.")) {
+    return { "ngrok-skip-browser-warning": "true" };
+  }
+  return {};
+}
+
 async function parseError(response: Response, fallback: string): Promise<Error> {
   try {
     const body = (await response.json()) as { detail?: string };
@@ -89,7 +96,10 @@ export async function checkHealth(): Promise<HealthResponse> {
   const timeoutId = setTimeout(() => controller.abort(), 10_000);
 
   try {
-    const response = await fetch(`${API_BASE}/health`, { signal: controller.signal });
+    const response = await fetch(`${API_BASE}/health`, {
+      signal: controller.signal,
+      headers: getNgrokBypassHeaders()
+    });
     if (!response.ok) {
       throw new Error(`Health check failed (${response.status})`);
     }
@@ -114,7 +124,8 @@ export async function uploadAudio(uri: string): Promise<TranscribeResponse> {
     const response = await fetch(`${API_BASE}/transcribe`, {
       method: "POST",
       body: data,
-      signal: controller.signal
+      signal: controller.signal,
+      headers: getNgrokBypassHeaders()
     });
 
     if (!response.ok) {
@@ -128,7 +139,9 @@ export async function uploadAudio(uri: string): Promise<TranscribeResponse> {
 }
 
 export async function listNotes(): Promise<NoteSummary[]> {
-  const response = await fetch(`${API_BASE}/notes`);
+  const response = await fetch(`${API_BASE}/notes`, {
+    headers: getNgrokBypassHeaders()
+  });
   if (!response.ok) {
     throw await parseError(response, `List notes failed (${response.status})`);
   }
@@ -136,7 +149,9 @@ export async function listNotes(): Promise<NoteSummary[]> {
 }
 
 export async function getNote(noteId: string): Promise<NoteDetail> {
-  const response = await fetch(`${API_BASE}/notes/${noteId}`);
+  const response = await fetch(`${API_BASE}/notes/${noteId}`, {
+    headers: getNgrokBypassHeaders()
+  });
   if (!response.ok) {
     throw await parseError(response, `Get note failed (${response.status})`);
   }
@@ -146,7 +161,10 @@ export async function getNote(noteId: string): Promise<NoteDetail> {
 export async function createSheetFromTranscript(transcriptId: string, text: string): Promise<SheetDetail> {
   const response = await fetch(`${API_BASE}/sheets/from-transcript`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...getNgrokBypassHeaders()
+    },
     body: JSON.stringify({ transcriptId, text })
   });
   if (!response.ok) {
@@ -156,7 +174,9 @@ export async function createSheetFromTranscript(transcriptId: string, text: stri
 }
 
 export async function listSheets(): Promise<SheetSummary[]> {
-  const response = await fetch(`${API_BASE}/sheets/`);
+  const response = await fetch(`${API_BASE}/sheets/`, {
+    headers: getNgrokBypassHeaders()
+  });
   if (!response.ok) {
     throw await parseError(response, `List sheets failed (${response.status})`);
   }
