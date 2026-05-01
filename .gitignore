@@ -21,3 +21,6 @@ mobile/.expo-shared/
 *.log
 .DS_Store
 Thumbs.db
+
+
+.env
